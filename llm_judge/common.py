@@ -1,5 +1,6 @@
 import ast
 import dataclasses
+import copy
 import json
 import logging
 import os
@@ -31,7 +32,8 @@ JUDGEMENT_PROMPT_FILE = JP_BENCH_DIR / "judge_prompts.jsonl"
 
 # API setting constants
 API_MAX_RETRY = 16
-API_RETRY_SLEEP = 10
+API_RETRY_SLEEP = 30
+API_MAX_TOKEN = 8192 - 3060
 
 # Categories that need reference answers
 NEED_REF_CATS = ["math", "reasoning", "coding"]
@@ -101,6 +103,7 @@ class MatchSingle:
         }
         if self.ref_answer:
             kwargs["ref_answer_1"] = self.ref_answer["choices"][0]["turns"][0]
+        kwargs = self.truncate_gpt_input(kwargs)
         judgment = self.judge.judge(**kwargs)
         score = self.get_score(judgment)
         return {
@@ -147,6 +150,32 @@ class MatchSingle:
             return ast.literal_eval(match.groups()[0])
         return -1
 
+    def truncate_gpt_input(self, input_data: dict) -> dict:
+        enc = tiktoken.encoding_for_model(self.judge.model)
+        data_keys = ["question", "answer"]
+        model_answer_key = "answer"
+
+        num_input_tokens = 0
+        for data_key in data_keys:
+            assert data_key in input_data, f"Cannot find {data_key} in {list(input_data.keys())}"
+            data_text = input_data[data_key]
+            num_input_tokens += len(enc.encode(data_text))
+        if self.ref_answer:
+            ref_data_key = "ref_answer_1"
+            assert ref_data_key in input_data, f"Cannot find {ref_data_key} in {list(input_data.keys())}"
+            num_input_tokens += len(enc.encode(input_data[ref_data_key]))
+
+        if num_input_tokens > API_MAX_TOKEN:
+            # run truncate
+            logger.warning(f"Over OpenAI MAX Token! The number of input token is {num_input_tokens}, in spite of not including the prompt template. Truncate the model answer to the 1/2 of OpenAI MAX Token.")
+            truncate_max_token = API_MAX_TOKEN // 4
+            truncated_data = input_data.copy()
+            model_answer = enc.decode(enc.encode(input_data[model_answer_key])[:truncate_max_token])
+            truncated_data[model_answer_key] = model_answer
+        else:
+            truncated_data = input_data
+        return truncated_data
+
 
 @dataclasses.dataclass
 class MatchPair:
@@ -179,7 +208,11 @@ class MatchPair:
             }
             if self.ref_answer is not None:
                 kwargs["ref_answer_1"] = self.ref_answer["choices"][0]["turns"][0]
-            return self.judge.judge(**kwargs)
+            logger.info("Check input length")
+            kwargs = self.truncate_gpt_input(kwargs)
+            logger.info("Run Eval")
+            judge_result = self.judge.judge(**kwargs)
+            return judge_result
 
         g1_judgment = play(self.answer_1, self.answer_2)
         g1_winner = self.get_winner(g1_judgment, model_a="model_1", model_b="model_2")
@@ -236,6 +269,46 @@ class MatchPair:
             return "tie"
         return "error"
 
+    def truncate_gpt_input(self, input_data: dict) -> dict:
+        enc = tiktoken.encoding_for_model(self.judge.model)
+        data_keys = ["question", "answer_a", "answer_b"]
+        model_answer_keys = ["answer_a", "answer_b"]
+
+        num_input_tokens = 0
+        for data_key in data_keys:
+            assert data_key in input_data, f"Cannot find {data_key} in {list(input_data.keys())}"
+            data_text = input_data[data_key]
+            num_input_tokens += len(enc.encode(data_text))
+        if self.ref_answer:
+            ref_data_key = "ref_answer_1"
+            assert ref_data_key in input_data, f"Cannot find {ref_data_key} in {list(input_data.keys())}"
+            num_input_tokens += len(enc.encode(input_data[ref_data_key]))
+
+        if num_input_tokens > API_MAX_TOKEN - 300:
+            # run truncate
+            logger.warning(f"Over OpenAI MAX Token! The number of input token is {num_input_tokens}, in spite of not including the prompt template. Truncate the model answer to the 1/2 of OpenAI MAX Token.")
+            threshold_max_token = API_MAX_TOKEN // 3
+            truncate_length = API_MAX_TOKEN // 3
+            truncated_data = copy.deepcopy(input_data)
+
+            model_answer_a_text = input_data[model_answer_keys[0]]
+            model_answer_b_text = input_data[model_answer_keys[1]]
+            model_answer_a_ids = enc.encode(model_answer_a_text)
+            model_answer_b_ids = enc.encode(model_answer_b_text)
+
+            if len(model_answer_a_ids) > threshold_max_token:
+                logger.warning(f"Model A's input is too long (The length is over the 1/2 of OpenAI MAX Token.). Truncate it to the OpenAI's 1/2.")
+                model_answer_a_text = enc.decode(model_answer_a_ids[:truncate_length])
+            if len(model_answer_b_ids) > threshold_max_token:
+                logger.warning(f"Model B's input is too long (The length is over the 1/2 of OpenAI MAX Token.). Truncate it to the OpenAI's 1/2.")
+                model_answer_b_text = enc.decode(model_answer_b_ids[:truncate_length])
+
+            truncated_data[model_answer_keys[0]] = model_answer_a_text
+            truncated_data[model_answer_keys[1]] = model_answer_b_text
+        else:
+            truncated_data = input_data
+        return truncated_data
+
 
 def load_questions(question_file: Union[str, Path]) -> list[dict]:
     """Load questions from a file.
@@ -256,14 +329,15 @@ def get_model_list(answer_dir: Union[str, Path]):
     return [path.name for path in Path(answer_dir).iterdir()]
 
 
-def load_model_answers(answer_dir: Union[str, Path]):
+def load_model_answers(answer_dir: Union[str, Path], ids: Optional[int] = None):
     """Load model answers.
 
     Args:
         answer_dir (Union[str, Path]): The answer directory.
     """
     answers = {}
-    with open(Path(answer_dir) / "results.jsonl", "r") as fin:
+    file_name = f"results_{ids}.jsonl" if ids is not None else "results.jsonl"
+    with open(Path(answer_dir) / file_name, "r") as fin:
         for line in fin:
             answer = json.loads(line)
             answers[answer["question_id"]] = answer
