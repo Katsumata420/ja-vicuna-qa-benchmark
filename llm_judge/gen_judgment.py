@@ -167,6 +167,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--verbose", "-v", action="count", default=0, help="Verbosity level"
     )
+    parser.add_argument(
+        "--ids", default=None, type=int,
+    )
     args = parser.parse_args()
 
     if args.verbose == 0:
@@ -204,7 +207,10 @@ if __name__ == "__main__":
             models.append(args.baseline_model)
     model_answers = {}
     for model in sorted(models):
-        answers = load_model_answers(PREDICTION_DIR / model)
+        if args.ids is not None and model != args.baseline_model:
+            answers = load_model_answers(PREDICTION_DIR / model, ids=args.ids)
+        else:
+            answers = load_model_answers(PREDICTION_DIR / model)
         for question in questions:
             assert question["question_id"] in answers
         model_answers[model] = answers
@@ -246,7 +252,9 @@ if __name__ == "__main__":
         output_dir = JUDGEMENT_DIR / "pairwise" / args.judge_model
     target_match_ids = set()
     for match_id in match_groups:
-        output_file = output_dir / f"{match_id}.jsonl"
+        # output_file = output_dir / f"{match_id}.jsonl"
+        output_filename = f"{match_id}-{args.ids}.jsonl" if args.ids is not None else f"{match_id}.jsonl"
+        output_file = output_dir / output_filename
         if output_file.exists():
             if not args.overwrite:
                 logger.info(f"Skip {match_id}; to overwrite, use --overwrite")
@@ -273,7 +281,8 @@ if __name__ == "__main__":
 
     logger.info("Play matches")
     for match_id, matches in match_groups.items():
-        output_file = output_dir / f"{match_id}.jsonl"
+        output_filename = f"{match_id}-{args.ids}.jsonl" if args.ids is not None else f"{match_id}.jsonl"
+        output_file = output_dir / output_filename
         results = []
         with ThreadPoolExecutor(args.parallel) as executor:
             futures = [executor.submit(match.play) for match in matches]

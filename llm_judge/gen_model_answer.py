@@ -79,6 +79,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--overwrite", action="store_true", help="Overwrite the existing results"
     )
+    parser.add_argument("--ids", default=None, type=int, help="generation_ids")
     args = parser.parse_args()
 
     if args.verbose == 0:
@@ -144,7 +145,10 @@ if __name__ == "__main__":
     special_token_map = config.get("special_token_map", {})
 
     prediction_dir = PREDICTION_DIR / model_id
-    prediction_file = prediction_dir / "results.jsonl"
+    if args.ids is not None:
+        prediction_file = prediction_dir / f"results_{args.ids}.jsonl"
+    else:
+        prediction_file = prediction_dir / "results.jsonl"
     if prediction_file.exists() and not args.overwrite:
         raise FileExistsError(
             f"{prediction_file} already exists. Use --overwrite to overwrite."
